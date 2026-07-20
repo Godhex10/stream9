@@ -667,8 +667,10 @@ async function fetchAllStreams(imdbId) {
 
   console.log(`[Streams] Fetching Torrentio (480p/720p) for ${imdbId}…`);
 
+  // Routed through /api/torrentio to dodge Torrentio's missing CORS header.
   const torrentioStreams = await fetchFromSource(
-    `${TORRENTIO_BASE}/${TORRENTIO_CFG}/stream/movie/${imdbId}.json`, 'torrentio'
+    `/api/torrentio?path=${encodeURIComponent(`${TORRENTIO_CFG}/stream/movie/${imdbId}.json`)}`,
+    'torrentio'
   );
 
   // De-dupe by infoHash/url
@@ -1221,8 +1223,10 @@ async function openSeriesStreamPicker(series, season, episode, epTitle) {
   streamModal.classList.add('open');
 
   try {
+    // Routed through /api/torrentio to dodge Torrentio's missing CORS header.
     const torrentioStreams = await fetchFromSource(
-      `${TORRENTIO_BASE}/${TORRENTIO_CFG}/stream/series/${streamId}.json`, 'torrentio'
+      `/api/torrentio?path=${encodeURIComponent(`${TORRENTIO_CFG}/stream/series/${streamId}.json`)}`,
+      'torrentio'
     );
 
     const seen = new Set();
