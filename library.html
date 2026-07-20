@@ -558,11 +558,18 @@ function renderLocalMovies() {
     Real-Debrid already applied — one URL covers all three.
 ══════════════════════════════════════════════ */
 const TORRENTIO_BASE  = 'https://torrentio.strem.fun';
+// Torrentio config — exclude big/unwanted qualities at the source so it only
+// returns the small stuff. qualityfilter EXCLUDES the listed categories, so we
+// list everything EXCEPT 480p/720p. Client-side guards below enforce this too.
+const TORRENTIO_CFG   = 'qualityfilter=4k,1080p,other,scr,cam,unknown,brremux,hdrall,dolbyvision';
+// Max file size we allow (mislabeled "720p" remuxes can be 5-7GB). Movies stay
+// mobile-friendly under ~2.5GB; anything bigger is dropped.
+const MAX_STREAM_BYTES = 2.5 * 1024 * 1024 * 1024;
 const AIOSTREAMS_BASE = 'https://aiostreams.elfhosted.com/stremio/e5e59244-2ee5-411a-ad13-c7f1d9d9e2b9/eyJpIjoiWFVxdk1ZQnRsQVFWQXdlbGdnelMrZz09IiwiZSI6Ii9wMkZiRGVkaWhSVENTaFY3SkFJY2Z5LzZ4V1orNlN4alFnM2hMajVZZlk9IiwidCI6ImEifQ';
-const NUVIO_BASE      = 'https://nuviostreamsaddon.up.railway.app';
-const VIDSRC_SCRAPER  = 'https://vidsrc-scraper-production-dc31.up.railway.app';
+const NUVIO_BASE      = 'https://nuviostreamsaddon-production-7e95.up.railway.app';
+const VIDSRC_SCRAPER  = 'https://vidsrc-scraper-production-5d8b.up.railway.app';
 // TMDB key — used to convert IMDb IDs to TMDB IDs for VidSrc scraper
-const TMDB_KEY        = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI4ZDZkOTE5NDEyMzA4MTdmNzgwN2Q2NDM3MzZlOGE0OSIsIm5iZiI6MS43NTIwNjU2MTU3ODY5OTk5ZTA4LCJzdWIiOiI2ODY2N2IyMzc2MGUxMmM5MDg1ODdiODAiLCJzY29wZXMiOlsiYXBpX3JlYWQiXSwidmVyc2lvbiI6MX0.cLsM-glyFIYi8kYfwWCUh_oa3dOFMvDiWlKX2AoNRiM';
+const TMDB_KEY        = 'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiI0ZmJjMTllZjQ5MTQ4Mjk5MzdlMWQ5NmJkMGM4MzU5OCIsIm5iZiI6MTc4MDU2NzY3NC4zNCwic3ViIjoiNmEyMTRlN2E5YTIzNjkxNDEyZTIzZWE3Iiwic2NvcGVzIjpbImFwaV9yZWFkIl0sInZlcnNpb24iOjF9.ltmsrkv5Kxg2KX_QgPRyg01WrS56Bo9FgljX8dbOBfY';
 
 // Cache per imdbId — stores merged results from all sources
 const streamCache = {};
@@ -654,32 +661,27 @@ async function fetchFromVidSrc(imdbId, mediaType, season, episode) {
   }
 }
 
-/* VidSrc-only movie fetch — HLS adaptive streams, mobile-friendly, no Real-Debrid */
+/* Torrentio-only movie fetch — capped to 480p/720p small files */
 async function fetchAllStreams(imdbId) {
   if (streamCache[imdbId]) return streamCache[imdbId];
 
-  console.log(`[Streams] Fetching VidSrc HLS for ${imdbId}…`);
+  console.log(`[Streams] Fetching Torrentio (480p/720p) for ${imdbId}…`);
 
-  // ── Torrent sources disabled — VidSrc only ──
-  // const [torrentioStreams, aiostreamsStreams, nuvioStreams] = await Promise.all([
-  //   fetchFromSource(`${TORRENTIO_BASE}/stream/movie/${imdbId}.json`, 'torrentio'),
-  //   fetchFromSource(`${AIOSTREAMS_BASE}/stream/movie/${imdbId}.json`, 'aiostreams'),
-  //   fetchFromSource(`${NUVIO_BASE}/stream/movie/${imdbId}.json`, 'nuvio')
-  // ]);
+  const torrentioStreams = await fetchFromSource(
+    `${TORRENTIO_BASE}/${TORRENTIO_CFG}/stream/movie/${imdbId}.json`, 'torrentio'
+  );
 
-  const vidsrcStreams = await fetchFromVidSrc(imdbId, 'movie');
-
-  // De-dupe by URL
+  // De-dupe by infoHash/url
   const seen   = new Set();
   const merged = [];
-  for (const stream of vidsrcStreams) {
+  for (const stream of torrentioStreams) {
     const key = stream.infoHash || stream.url || (stream.name + (stream.title || ''));
     if (!key || seen.has(key)) continue;
     seen.add(key);
     merged.push(stream);
   }
 
-  console.log(`[Streams] Total: ${merged.length} (VidSrc HLS)`);
+  console.log(`[Streams] Total: ${merged.length} (Torrentio 480p/720p)`);
 
   streamCache[imdbId] = merged;
   return merged;
@@ -847,11 +849,11 @@ async function fetchBestFormat(imdbId) {
 async function openStreamPicker(movie) {
   selectedMovie = movie;
   document.getElementById('streamModalTitle').textContent = movie.name || movie.title;
-  document.getElementById('streamModalSub').textContent = '🔍 Searching VidSrc…';
+  document.getElementById('streamModalSub').textContent = '🔍 Searching for 480p/720p streams…';
   streamList.innerHTML = `
     <div style="color:var(--muted);font-size:0.85rem;padding:2rem 0;text-align:center;">
       <div style="margin-bottom:0.5rem;font-size:1.5rem">⏳</div>
-      Searching VidSrc…
+      Searching for mobile-friendly 480p/720p streams…
     </div>`;
   streamModal.classList.add('open');
 
@@ -928,15 +930,25 @@ function renderStreamItems(streams, movie) {
       // Streams with no codec info at all (e.g. Nuvio direct HTTP) pass through.
       if (hasCodecInfo && !isX264) return false;
 
+      // ── LOW-END GUARD — keep only mobile-friendly streams ──
+      // Torrentio's qualityfilter isn't fully reliable (3D/mislabeled remuxes
+      // leak through), so we enforce quality + size client-side as the real
+      // guarantee. Only 480p/720p, and hard-cap size so giant "720p" remuxes
+      // don't slip in. Torrent/RD streams have a size; direct-HTTP (no size)
+      // streams pass through untouched.
+      const quality = getQualityLabel(stream); // '', '480P', '720P', '1080P', '4K'...
+      if (quality && !['480P', '720P'].includes(quality)) return false; // block 1080p/4K
+      if (size > 0 && size > 2.5 * 1024 * 1024 * 1024) return false;     // cap at 2.5 GB
+
       return true;
     });
 
     if (filtered.length === 0) {
       streamList.innerHTML = `
         <div class="status-message">
-          No compatible streams found.<br>
+          No compatible low-end streams found.<br>
           <span style="font-size:0.8rem;color:var(--muted2)">
-            All streams are x265/HEVC or have no audio.<br>
+            No small 480p/720p x264 release for this title.<br>
             Try a different movie or episode.
           </span>
         </div>`;
@@ -1200,27 +1212,22 @@ async function openSeriesStreamPicker(series, season, episode, epTitle) {
 
   selectedMovie = { ...series, _streamId: streamId, _fullTitle: fullTitle };
   document.getElementById('streamModalTitle').textContent = fullTitle;
-  document.getElementById('streamModalSub').textContent = '🔍 Searching all sources…';
+  document.getElementById('streamModalSub').textContent = '🔍 Searching 480p/720p streams…';
   streamList.innerHTML = `
     <div style="color:var(--muted);font-size:0.85rem;padding:2rem 0;text-align:center;">
       <div style="margin-bottom:0.5rem;font-size:1.5rem">⏳</div>
-      Searching VidSrc…
+      Searching Torrentio (480p/720p)…
     </div>`;
   streamModal.classList.add('open');
 
   try {
-    // ── Torrent sources disabled — VidSrc only ──
-    // const [torrentioStreams, aioStreams, nuvioStreams] = await Promise.all([
-    //   fetchFromSource(`${TORRENTIO_BASE}/stream/series/${streamId}.json`, 'torrentio'),
-    //   fetchFromSource(`${AIOSTREAMS_BASE}/stream/series/${streamId}.json`, 'aiostreams'),
-    //   fetchFromSource(`${NUVIO_BASE}/stream/series/${streamId}.json`, 'nuvio')
-    // ]);
-
-    const vidsrcStreams = await fetchFromVidSrc(series.id, 'series', season, episode);
+    const torrentioStreams = await fetchFromSource(
+      `${TORRENTIO_BASE}/${TORRENTIO_CFG}/stream/series/${streamId}.json`, 'torrentio'
+    );
 
     const seen = new Set();
     const merged = [];
-    for (const s of vidsrcStreams) {
+    for (const s of torrentioStreams) {
       const key = s.infoHash || s.url || s.name;
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -1236,7 +1243,7 @@ async function openSeriesStreamPicker(series, season, episode, epTitle) {
     }
 
     document.getElementById('streamModalSub').textContent =
-      `${merged.length} streams found — VidSrc ✅ = no RD needed`;
+      `${merged.length} streams found (480p/720p)`;
 
     renderStreamItems(merged, { ...series, id: streamId, name: fullTitle, _fullTitle: fullTitle });
 
